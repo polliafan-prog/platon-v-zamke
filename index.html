@@ -307,12 +307,18 @@ function toonGrad() {
   if (!TOON_GRAD) { TOON_GRAD = new THREE.DataTexture(new Uint8Array([105, 165, 215, 255]), 4, 1, THREE.LuminanceFormat); TOON_GRAD.minFilter = TOON_GRAD.magFilter = THREE.NearestFilter; TOON_GRAD.generateMipmaps = false; TOON_GRAD.needsUpdate = true; }
   return TOON_GRAD;
 }
-function toonMat(o) { o = Object.assign({ roughness: 0.92, metalness: 0 }, o); delete o.flatShading; return new THREE.MeshStandardMaterial(o); }
+/* LOWMAT: phones and tablets (and a computer that struggled) get the light Lambert surface: it looks almost the same
+   in this soft toon style but costs the graphics chip several times less */
+let LOWMAT = false;
+function toonMat(o) { o = Object.assign({ roughness: 0.92, metalness: 0 }, o); delete o.flatShading; if (LOWMAT) { delete o.roughness; delete o.metalness; return new THREE.MeshLambertMaterial(o); } return new THREE.MeshStandardMaterial(o); }
+/* shared "standard" material that can carry flat shading; cached so equal ones can be glued together */
+const STDM = {};
+function stdMat(o) { const k = (LOWMAT ? 'L' : 'S') + JSON.stringify(o); if (!STDM[k]) { if (LOWMAT) { const p = Object.assign({}, o); delete p.roughness; delete p.metalness; delete p.flatShading; STDM[k] = new THREE.MeshLambertMaterial(p); } else STDM[k] = new THREE.MeshStandardMaterial(o); } return STDM[k]; }
 /* brighter copy of a material for the task objects, so they read clearly among the decor */
 function litMat(m) { const k = '__lit' + m.uuid; if (!MATS[k]) { const n = m.clone(); if (n.emissive && n.color) { n.emissive = n.color.clone(); n.emissiveIntensity = 0.08; } MATS[k] = n; } return MATS[k]; }
 function mat(color, o) {
   o = o || {};
-  const k = color + '|' + JSON.stringify(o);
+  const k = (LOWMAT ? 'L' : 'S') + color + '|' + JSON.stringify(o);
   if (!MATS[k]) MATS[k] = toonMat(Object.assign({ color }, o));
   return MATS[k];
 }
@@ -568,7 +574,7 @@ function tex(name) {
   return t;
 }
 function texR(name, rx, ry) { const t = tex(name).clone(); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry); t.needsUpdate = true; return t; }
-function texMat(name, o) { const k = 'tex:' + name + JSON.stringify(o || {}); if (!MATS[k]) MATS[k] = toonMat(Object.assign({ map: tex(name) }, o || {})); return MATS[k]; }
+function texMat(name, o) { const k = (LOWMAT ? 'L' : 'S') + 'tex:' + name + JSON.stringify(o || {}); if (!MATS[k]) MATS[k] = toonMat(Object.assign({ map: tex(name) }, o || {})); return MATS[k]; }
 
 let GLOW_K = 1, LIGHT_K = 1; /* the rooms are already lit by day: softer glows, no blown-out spots */
 function glowSprite(color, size, opacity) {
@@ -644,19 +650,21 @@ const QUALITY = (() => {
   return 1;
 })();
 let Q = QUALITY; window.__Q = Q;
+/* lighter surfaces everywhere except a computer; a computer that struggled earlier also gets them (remembered level) */
+try { const v = JSON.parse(localStorage.getItem('platonPerf') || 'null'); LOWMAT = Q < 2 || !!(v && v.q === 2 && v.s >= 3); } catch (e) { LOWMAT = Q < 2; }
 /* keep the number of rendered pixels reasonable (Retina MacBooks have huge screens) */
 function pixelRatioFor() {
   /* sharp on a desktop / MacBook retina screen; the frame-rate watcher lowers it only if it really lags */
   const android = /Android/i.test(navigator.userAgent);
   const cap = [1, android ? 1.25 : 1.5, 2][Q], budget = [0.8e6, android ? 1.1e6 : 1.6e6, 4.4e6][Q];
   const px = window.innerWidth * window.innerHeight;
-  if (Q === 2) return Math.min(window.devicePixelRatio || 1, 2); /* computers (MacBook too): full screen sharpness */
+  if (Q === 2) return Math.max(1, Math.min(window.devicePixelRatio || 1, 1.75, Math.sqrt(3.2e6 / Math.max(1, px)))); /* computers: sharp, but not so heavy that a MacBook judders */
   return Math.max(0.75, Math.min(window.devicePixelRatio || 1, cap, Math.sqrt(budget / Math.max(1, px))));
 }
 function initRenderer() {
   const r = new THREE.WebGLRenderer({ antialias: Q > 0, powerPreference: 'high-performance' });
   R.dpr = pixelRatioFor(); r.setPixelRatio(R.dpr);
-  r.shadowMap.enabled = Q > 0; r.shadowMap.type = THREE.PCFShadowMap;
+  r.shadowMap.enabled = Q === 2; /* real shadows only on computers; phones get a soft blob under Platon */ r.shadowMap.type = THREE.PCFShadowMap;
   document.getElementById('scene').appendChild(r.domElement);
   R.renderer = r;
   R.scene = new THREE.Scene();
@@ -779,14 +787,14 @@ function addLight(l, base) { l.userData.base = base == null ? l.intensity : base
 function setLightLevel(k) { R.lights.forEach(l => l.intensity = l.userData.base * k); }
 function keyLight(color, intensity, pos, size, target) {
   const l = new THREE.DirectionalLight(color, intensity); l.position.set(pos[0], pos[1], pos[2]);
-  l.castShadow = Q > 0; const n = Q === 2 ? 2048 : 1024; l.shadow.mapSize.set(n, n);
+  l.castShadow = Q === 2; const n = 1024; l.shadow.mapSize.set(n, n);
   const c = l.shadow.camera; c.left = -size; c.right = size; c.top = size; c.bottom = -size; c.near = 1; c.far = 120;
   l.shadow.bias = -0.0008; l.shadow.normalBias = 0.03;
   if (target) { l.target.position.set(target[0], target[1], target[2]); R.world.add(l.target); }
   return addLight(l);
 }
 function pointLight(color, intensity, dist, x, y, z) { const l = new THREE.PointLight(color, intensity * LIGHT_K, dist, 1.4); l.position.set(x, y, z); if (!lightAllowed()) return l; return addLight(l); }
-function lightAllowed() { const n = R.lights.filter(l => l.isPointLight).length; return n < [3, 5, 6][Q]; }
+function lightAllowed() { const n = R.lights.filter(l => l.isPointLight).length; return n < [1, 2, 4][Q]; }
 
 /* ---------- Platon: fluffy orange elf-guide with a lantern on his long cap ---------- */
 function makePlaton() {
@@ -2674,7 +2682,7 @@ function buildLevel() {
   /* ground terrace */
   const fl = new THREE.Mesh(G.plane(2 * XL, ZFRONT - ZF), floorM); fl.rotation.x = -Math.PI / 2; fl.position.set(0, 0, (ZFRONT + ZF) / 2); fl.receiveShadow = true; fl.userData.walk = true; w.add(fl); LV.walk.push(fl);
   /* the terrace stands on a big rocky hill */
-  const rockM = new THREE.MeshStandardMaterial({ color: '#3a2f56', roughness: 1, flatShading: true });
+  const rockM = stdMat({ color: '#3a2f56', roughness: 1, flatShading: true });
   const rock = new THREE.Mesh(new THREE.CylinderGeometry(22, 34, 16, 14, 3), rockM); rock.position.set(0, -8.4, 0.5); rock.scale.set(1, 1, 0.75); rock.userData.noPick = true; R.world.add(rock);
   add(w, G.box(2 * XL + 1, 6, 1), stD, 0, -3, ZFRONT + 0.5).userData.noPick = true;
   region('ground', -XL, XL, ZF, ZFRONT, 0);
@@ -2974,7 +2982,7 @@ function makeMoon() {
 /* ===== fountain: water jets, falling streams, ripples and a soft blue glow ===== */
 function makeFountain(x, z) {
   const w = R.world;
-  const water = new THREE.Mesh(new THREE.CircleGeometry(1.6, 40), new THREE.MeshStandardMaterial({ color: '#5fb4e8', emissive: '#2a8ad0', emissiveIntensity: 0.75, roughness: 0.15, metalness: 0.1, transparent: true, opacity: 0.9 }));
+  const water = new THREE.Mesh(new THREE.CircleGeometry(1.6, 40), stdMat({ color: '#5fb4e8', emissive: '#2a8ad0', emissiveIntensity: 0.75, roughness: 0.15, metalness: 0.1, transparent: true, opacity: 0.9 }));
   water.rotation.x = -Math.PI / 2; water.position.set(x, 0.47, z); water.userData.noPick = true; water.userData.ownMat = true; w.add(water);
   const top = new THREE.Mesh(new THREE.CircleGeometry(0.66, 28), water.material); top.rotation.x = -Math.PI / 2; top.position.set(x, 1.73, z); top.userData.noPick = true; w.add(top);
   const glowB = new THREE.Mesh(new THREE.CircleGeometry(2.6, 40), new THREE.MeshBasicMaterial({ map: tex('glow'), color: '#7fd0ff', transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false }));
@@ -3048,7 +3056,7 @@ function roundFloorRegion(RR) { LV.regions.push({ area: 'floor', rad: RR - 0.8, 
 function floorDisc(w, RR, texName, color, rep) {
   const fl = new THREE.Mesh(new THREE.CircleGeometry(RR + 0.3, 72), toonMat({ map: texR(texName, rep || RR / 2.2, rep || RR / 2.2), color, roughness: 1 }));
   fl.rotation.x = -Math.PI / 2; fl.receiveShadow = true; fl.userData.walk = true; w.add(fl); LV.walk.push(fl);
-  const rock = new THREE.Mesh(new THREE.CylinderGeometry(RR + 1.2, RR + 5, 12, 20, 2), new THREE.MeshStandardMaterial({ color: '#5a4a6a', roughness: 1, flatShading: true }));
+  const rock = new THREE.Mesh(new THREE.CylinderGeometry(RR + 1.2, RR + 5, 12, 20, 2), stdMat({ color: '#5a4a6a', roughness: 1, flatShading: true }));
   rock.position.set(0, -6.05, 0); rock.userData.noPick = true; w.add(rock);
   return fl;
 }
@@ -3481,13 +3489,13 @@ function buildHub() {
   };
   /* a floating island: green grass on top, earth cut away below, clouds around */
   { const top = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 28), toonMat({ color: '#a8d878', roughness: 1 })); top.scale.set(9.6, 0.6, 6.0); top.position.set(0.3, -0.45, 0.4); top.userData.noPick = true; w.add(top);
-    const lip = new THREE.Mesh(new THREE.CylinderGeometry(1, 0.97, 1, 28), new THREE.MeshStandardMaterial({ color: '#7cba58', roughness: 1 })); lip.scale.set(9.7, 0.25, 6.08); lip.position.set(0.3, -0.85, 0.4); lip.userData.noPick = true; w.add(lip);
+    const lip = new THREE.Mesh(new THREE.CylinderGeometry(1, 0.97, 1, 28), stdMat({ color: '#7cba58', roughness: 1 })); lip.scale.set(9.7, 0.25, 6.08); lip.position.set(0.3, -0.85, 0.4); lip.userData.noPick = true; w.add(lip);
     /* the earth under the grass: rugged layers of soil and rock, roots hanging out, stones stuck in it */
     const rugged = (rt, rb, h, seg, hs, amp) => { const gm = new THREE.CylinderGeometry(rt, rb, h, seg, hs); const ps = gm.attributes && gm.attributes.position; if (ps) { for (let k = 0; k < ps.count; k++) { const x = ps.getX(k), y = ps.getY(k), z = ps.getZ(k); if (y > h / 2 - 0.01) continue; const hh = hash3(x, y, z), f = 1 + (hh - 0.5) * 2 * amp; ps.setX(k, x * f); ps.setZ(k, z * f); ps.setY(k, y + (hash3(z, x, y) - 0.5) * 0.16); } /* same jitter for vertices that share a spot: no cracks */ gm.computeVertexNormals(); } return gm; };
     const soilM = [['#a0704c', 1, 0.86, 1.4, -1.55], ['#8a5a3e', 0.86, 0.62, 1.8, -3.15], ['#74492f', 0.62, 0.34, 1.9, -5.0], ['#5e3a26', 0.34, 0.08, 2.0, -6.9]];
-    soilM.forEach(([c, rt, rb, h, y], n) => { const e = new THREE.Mesh(rugged(rt, rb, h, 22, 3, 0.1 + n * 0.03), new THREE.MeshStandardMaterial({ color: c, roughness: 1, flatShading: true })); e.scale.set(9.5, 1, 5.9); e.position.set(0.3, y, 0.4); e.userData.noPick = true; w.add(e); });
+    soilM.forEach(([c, rt, rb, h, y], n) => { const e = new THREE.Mesh(rugged(rt, rb, h, 22, 3, 0.1 + n * 0.03), stdMat({ color: c, roughness: 1, flatShading: true })); e.scale.set(9.5, 1, 5.9); e.position.set(0.3, y, 0.4); e.userData.noPick = true; w.add(e); });
     /* stones in the earth */
-    for (let k = 0; k < 22; k++) { const a = rand(0.15, Math.PI - 0.15) * (k % 4 === 0 ? -1 : 1), y = rand(-6, -1.2), f = Math.max(0.12, 0.86 - (-1.2 - y) * 0.14); add(w, G.sph(1, 6, 4), new THREE.MeshStandardMaterial({ color: pick(['#a49aa6', '#8e8494', '#b8aeb4']), roughness: 1, flatShading: true }), 0.3 + Math.cos(a) * 9.5 * f, y, 0.4 + Math.sin(a) * 5.9 * f, rand(0, 3), rand(0, 3), 0, [rand(0.25, 0.5), rand(0.2, 0.4), rand(0.25, 0.45)]).userData.noPick = true; }
+    for (let k = 0; k < 22; k++) { const a = rand(0.15, Math.PI - 0.15) * (k % 4 === 0 ? -1 : 1), y = rand(-6, -1.2), f = Math.max(0.12, 0.86 - (-1.2 - y) * 0.14); add(w, G.sph(1, 6, 4), stdMat({ color: pick(['#a49aa6', '#8e8494', '#b8aeb4']), roughness: 1, flatShading: true }), 0.3 + Math.cos(a) * 9.5 * f, y, 0.4 + Math.sin(a) * 5.9 * f, rand(0, 3), rand(0, 3), 0, [rand(0.25, 0.5), rand(0.2, 0.4), rand(0.25, 0.45)]).userData.noPick = true; }
     /* roots dangling from the sides and the bottom */
     const rootM = mat('#6e4a30', { roughness: 1 });
     for (let k = 0; k < 16; k++) { const a = rand(0.1, Math.PI - 0.1), y0 = rand(-4.8, -1.0), f = Math.max(0.15, 0.86 - (-1.0 - y0) * 0.15), x0 = 0.3 + Math.cos(a) * 9.5 * f, z0 = 0.4 + Math.sin(a) * 5.9 * f, L = rand(1.0, 2.6), pts = [];
@@ -3500,7 +3508,7 @@ function buildHub() {
     [[-11.5, -1.5, 1.5, 0.9], [11.8, 0.6, -1.0, 0.7], [-9.5, -6.5, 2.0, 0.6], [10.2, -5.5, 2.5, 0.8]].forEach(([x, y, z, sc], n) => {
       const g = new THREE.Group(); g.position.set(x, y, z); g.scale.setScalar(sc); w.add(g);
       add(g, G.cyl(1, 1, 0.3, 12), mat('#a8d878', { roughness: 1 }), 0, 0, 0).userData.noPick = true;
-      const r = new THREE.Mesh(rugged(1, 0.15, 1.6, 10, 2, 0.15), new THREE.MeshStandardMaterial({ color: '#8a5a3e', roughness: 1, flatShading: true })); r.position.y = -0.95; r.userData.noPick = true; g.add(r);
+      const r = new THREE.Mesh(rugged(1, 0.15, 1.6, 10, 2, 0.15), stdMat({ color: '#8a5a3e', roughness: 1, flatShading: true })); r.position.y = -0.95; r.userData.noPick = true; g.add(r);
       for (let q = 0; q < 4; q++) add(g, G.sph(rand(0.3, 0.45), 10, 8), mat(pick(GREENS)), rand(-0.5, 0.5), 0.3, rand(-0.4, 0.4)).userData.noPick = true;
       onAnim(t => g.position.y = y + Math.sin(t * 0.6 + n * 1.7) * 0.25, g); });
     /* a stone path from the gate */
@@ -4511,7 +4519,7 @@ async function goHub(first) {
   await fade(true, null, first ? 'Платон засыпает…' : 'Платон возвращается в замок…');
   if (tok !== S.tok) return;
   buildHub(); R.platon = null; S.compass = null; S.items = [];
-  mergeStatic(R.world, true);
+  mergeStatic(R.world, true); perfApply(PERF.steps);
   HUB.cells.forEach(c => { c.frame.visible = !S.done[c.id]; c.done.visible = S.done[c.id]; if (c.veil) c.veil.visible = !!S.done[c.id]; });
   S.mode = 'hub'; show('hud', true); $('counter').hidden = true; $('mapHud').hidden = false;
   updateCamera(0, true); await warmUp(); if (tok !== S.tok) return;
@@ -4525,7 +4533,7 @@ async function enterRoom(id) {
   const tok = ++S.tok; S.room = id;
   await fade(true, null, ROOMS[id].name + '…');
   if (tok !== S.tok) return;
-  ROOMS[id].build(); mergeStatic(R.world, false); setupScene();
+  ROOMS[id].build(); mergeStatic(R.world, false); setupScene(); perfApply(PERF.steps);
   S.count = 0; S.got = []; S.busy = false; S.zoom = 1; S.focus = null; S.choices = null; S.camFix = null;
   placeRoomItems(); setCounter(false);
   S.mode = 'play'; show('hud', true); $('counter').hidden = false; $('mapHud').hidden = false; setControls(false);
@@ -4753,25 +4761,31 @@ function setupFullscreen() {
 }
 
 /* ---------------- keep it smooth on slow devices ---------------- */
+/* smoothness watcher: if the frame rate drops, step down one notch at a time; the notch is remembered
+   on this device, so next time the game starts straight away at the level that runs smoothly */
 var PERF = { t: 0, n: 0, steps: 0 };
+/* level n (0..5): what is switched down. Applied again after every room is built, since lights are new each time */
+function perfApply(n) {
+  const base = pixelRatioFor();
+  if (Q === 2) R.dpr = Math.min(base, [base, 1.5, 1.5, 1.25, 1.25, 1][Math.min(n, 5)]);
+  else R.dpr = Math.max(0.6, base * Math.pow(0.85, n));
+  R.lights.forEach((l, i) => { if (l.isDirectionalLight && n >= 2) l.castShadow = false; if (l.isPointLight && i % 2 && n >= (Q === 2 ? 4 : 3)) l.visible = false; });
+  if (Q === 2 && n >= 3) LOWMAT = true; /* from the next room on: lighter surfaces */
+  R.renderer.setPixelRatio(R.dpr);
+}
+try { const v = JSON.parse(localStorage.getItem('platonPerf') || 'null'); if (v && v.q === Q) PERF.steps = Math.min(5, v.s | 0); } catch (e) { }
 function perfWatch(dt) {
-  if (S.mode !== 'play' || document.hidden) { PERF.t = 0; PERF.n = 0; return; }
+  if ((S.mode !== 'play' && S.mode !== 'hub') || document.hidden) { PERF.t = 0; PERF.n = 0; return; }
   PERF.t += dt; PERF.n++;
-  if (PERF.t < 2) return;
+  if (PERF.t < 1.5) return;
   const fps = PERF.n / PERF.t; PERF.t = 0; PERF.n = 0;
-  if (PERF.warm == null) { PERF.warm = 1; return; } /* skip the first seconds: loading a room always stutters */
-  if (fps < (Q === 2 ? 34 : 45) && PERF.steps < 5) {
-    PERF.steps++;
-    if (Q === 2) {
-      /* on a computer keep the picture sharp: first drop extras, only then resolution */
-      if (PERF.steps === 1) R.lights.forEach((l, i) => { if (l.isPointLight && i % 2) l.visible = false; });
-      else if (PERF.steps === 2) R.lights.forEach(l => { if (l.isDirectionalLight) l.castShadow = false; });
-      else { R.dpr = Math.max(1.25, R.dpr * 0.85); R.renderer.setPixelRatio(R.dpr); resize(); }
-      return;
-    }
-    R.dpr = Math.max(0.6, R.dpr * 0.85); R.renderer.setPixelRatio(R.dpr); resize();
-    if (PERF.steps === 2) R.lights.forEach(l => { if (l.isDirectionalLight) l.castShadow = false; });
-    if (PERF.steps === 3) R.lights.forEach((l, i) => { if (l.isPointLight && i % 2) l.visible = false; });
+  if (PERF.warm == null) { PERF.warm = 1; return; } /* skip the first moment: loading a room always stutters */
+  /* long smooth stretch: try one notch better again (a lag once must not keep the picture poor forever) */
+  if (fps > 57 && PERF.steps > 0) { PERF.good = (PERF.good || 0) + 1; if (PERF.good >= 12) { PERF.good = 0; PERF.steps--; perfApply(PERF.steps); resize(); try { localStorage.setItem('platonPerf', JSON.stringify({ q: Q, s: PERF.steps })); } catch (e) { } } return; }
+  PERF.good = 0;
+  if (fps < (Q === 2 ? 50 : 45) && PERF.steps < 5) {
+    PERF.steps++; perfApply(PERF.steps); resize();
+    try { localStorage.setItem('platonPerf', JSON.stringify({ q: Q, s: PERF.steps })); } catch (e) { }
   }
 }
 
